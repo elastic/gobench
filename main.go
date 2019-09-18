@@ -1,3 +1,20 @@
+// Licensed to Elasticsearch B.V. under one or more contributor
+// license agreements. See the NOTICE file distributed with
+// this work for additional information regarding copyright
+// ownership. Elasticsearch B.V. licenses this file to you under
+// the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing,
+// software distributed under the License is distributed on an
+// "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+// KIND, either express or implied.  See the License for the
+// specific language governing permissions and limitations
+// under the License.
+
 package main
 
 import (
@@ -18,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/blang/semver"
 	"github.com/kr/pretty"
 	"github.com/pkg/errors"
 	"golang.org/x/tools/benchmark/parse"
@@ -199,16 +217,19 @@ func main() {
 }
 
 func createMapping(esURL *url.URL) error {
-	var body bytes.Buffer
-	var mappings struct {
-		Mappings struct {
-			Doc struct {
-				Properties map[string]fieldProperties `json:"properties"`
-			} `json:"_doc"`
-		} `json:"mappings"`
+	// Versions of Elasticsearch prior to 7.0.0 require type names.
+	esVersion, err := getEsVersion(esURL)
+	if err != nil {
+		return err
 	}
-	mappings.Mappings.Doc.Properties = esFieldProperties
-	if err := json.NewEncoder(&body).Encode(&mappings); err != nil {
+	includeTypeName := esVersion.LT(semver.MustParse("7.0.0"))
+
+	var body bytes.Buffer
+	properties := map[string]interface{}{"properties": esFieldProperties}
+	if includeTypeName {
+		properties = map[string]interface{}{"_doc": properties}
+	}
+	if err := json.NewEncoder(&body).Encode(map[string]interface{}{"mappings": properties}); err != nil {
 		return err
 	}
 
@@ -234,6 +255,24 @@ func createMapping(esURL *url.URL) error {
 		return err
 	}
 	return nil
+}
+
+func getEsVersion(esURL *url.URL) (*semver.Version, error) {
+	resp, err := http.Get(esURL.String())
+	if err != nil {
+		return nil, err
+	}
+	var esVersion struct {
+		Version struct {
+			Number string
+		} `json:"version"`
+	}
+	defer resp.Body.Close()
+
+	if err := json.NewDecoder(resp.Body).Decode(&esVersion); err != nil {
+		return nil, err
+	}
+	return semver.New(esVersion.Version.Number)
 }
 
 func encodeIndexOp(
