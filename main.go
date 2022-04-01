@@ -48,17 +48,6 @@ var (
 		"comma-separated list of key=value pairs to add to each document",
 	)
 
-	esFlag = flag.String(
-		"es", "",
-		`
-Elasticsearch URL into which the benchmark data should be indexed, e.g. http://localhost:9200`[1:],
-	)
-
-	esIndexFlag = flag.String(
-		"index", "gobench",
-		"Elasticsearch index into which the benchmarks should be stored.",
-	)
-
 	verboseFlag = flag.Bool("v", false, "Be verbose")
 )
 
@@ -74,6 +63,27 @@ func (e *esError) Error() string {
 const (
 	exceptionResourceAlreadyExists = "resource_already_exists_exception"
 )
+
+type elasticsearchConfig struct {
+	host  string
+	user  string
+	pass  string
+	index string
+}
+
+type benchmark struct {
+	parse.Benchmark
+	apmBenchmark
+}
+
+type apmBenchmark struct {
+	ErrorResponses float64
+	Errors         float64
+	Events         float64
+	Metrics        float64
+	Spans          float64
+	TXs            float64
+}
 
 type fieldProperties map[string]interface{}
 
@@ -97,6 +107,14 @@ const (
 	fieldGitSubject       = "subject"
 	fieldGitCommitter     = "committer"
 	fieldGitCommitterDate = "date"
+
+	fieldAPMbench             = "apmbench"
+	fieldAPMbenchErrsRespPerS = "error_responses_s"
+	fieldAPMbenchErrsPerS     = "errors_s"
+	fieldAPMbenchEventsPerS   = "events_s"
+	fieldAPMbenchMetricsPerS  = "metrics_s"
+	fieldAPMbenchSpansPerS    = "spans_s"
+	fieldAPMbenchTxPerS       = "txs_s"
 )
 
 var (
@@ -125,10 +143,35 @@ var (
 				},
 			},
 		},
+		fieldAPMbench: {
+			"properties": map[string]fieldProperties{
+				fieldAPMbenchErrsRespPerS: {"type": "double"},
+				fieldAPMbenchErrsPerS:     {"type": "double"},
+				fieldAPMbenchEventsPerS:   {"type": "double"},
+				fieldAPMbenchMetricsPerS:  {"type": "double"},
+				fieldAPMbenchSpansPerS:    {"type": "double"},
+				fieldAPMbenchTxPerS:       {"type": "double"},
+			},
+		},
 	}
 )
 
 func main() {
+	var esConfig elasticsearchConfig
+	flag.StringVar(&esConfig.host,
+		"es", "",
+		`Elasticsearch URL into which the benchmark data should be indexed, e.g. http://localhost:9200`,
+	)
+	flag.StringVar(&esConfig.index,
+		"index", "gobench",
+		"Elasticsearch index into which the benchmarks should be stored.",
+	)
+	flag.StringVar(&esConfig.user, "es-username", "",
+		"Elasticsearch username used for authentication.",
+	)
+	flag.StringVar(&esConfig.pass, "es-password", "",
+		"Elasticsearch password used for authentication.",
+	)
 	flag.Parse()
 
 	tags := make(map[string]string)
@@ -153,10 +196,10 @@ func main() {
 	var output io.Writer
 	var buf bytes.Buffer
 	var esURL *url.URL
-	if *esFlag != "" {
-		url, err := url.Parse(*esFlag)
+	if esConfig.host != "" {
+		url, err := url.Parse(esConfig.host)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "invalid Elasticsearch URL %q: %s\n", *esFlag, err)
+			fmt.Fprintf(os.Stderr, "invalid Elasticsearch URL %q: %s\n", esConfig.host, err)
 			os.Exit(2)
 		}
 		esURL = url
@@ -170,7 +213,7 @@ func main() {
 	encoder := json.NewEncoder(output)
 
 	if esURL != nil {
-		if err := createMapping(esURL); err != nil {
+		if err := createMapping(esConfig); err != nil {
 			log.Fatalf("error creating/updating mapping: %s", err)
 		}
 	}
@@ -189,10 +232,13 @@ func main() {
 			goarch = strings.TrimSpace(line[len("goarch:"):])
 		default:
 			if b, err := parse.ParseLine(line); err == nil {
+				result := benchmark{Benchmark: *b}
+				result.apmBenchmark = parseAPMBenchmark(line)
 				encodeIndexOp(
-					encoder, b,
+					encoder, result,
 					pkg, goos, goarch,
 					tags, timestamp,
+					esConfig,
 				)
 			}
 		}
@@ -207,7 +253,12 @@ func main() {
 
 	bulkURL := *esURL
 	bulkURL.Path += "/_bulk"
-	resp, err := http.Post(bulkURL.String(), "application/x-ndjson", &buf)
+	req, err := http.NewRequest(http.MethodPost, bulkURL.String(), &buf)
+	if esConfig.user != "" && esConfig.pass != "" {
+		req.SetBasicAuth(esConfig.user, esConfig.pass)
+	}
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Fatalf("error executing bulk updates: %s", err)
 	}
@@ -216,9 +267,9 @@ func main() {
 	}
 }
 
-func createMapping(esURL *url.URL) error {
+func createMapping(cfg elasticsearchConfig) error {
 	// Versions of Elasticsearch prior to 7.0.0 require type names.
-	esVersion, err := getEsVersion(esURL)
+	esVersion, err := getEsVersion(cfg.host)
 	if err != nil {
 		return err
 	}
@@ -233,11 +284,13 @@ func createMapping(esURL *url.URL) error {
 		return err
 	}
 
-	mappingURL := *esURL
-	mappingURL.Path += "/" + *esIndexFlag
-	req, err := http.NewRequest(http.MethodPut, mappingURL.String(), &body)
+	mappingURL := cfg.host + "/" + cfg.index
+	req, err := http.NewRequest(http.MethodPut, mappingURL, &body)
 	if err != nil {
 		return err
+	}
+	if cfg.user != "" && cfg.pass != "" {
+		req.SetBasicAuth(cfg.user, cfg.pass)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -248,7 +301,7 @@ func createMapping(esURL *url.URL) error {
 		esErr, ok := err.(*esError)
 		if ok && esErr.Type == exceptionResourceAlreadyExists {
 			if *verboseFlag {
-				log.Printf("index %q already exists", *esIndexFlag)
+				log.Printf("index %q already exists", cfg.index)
 			}
 			return nil
 		}
@@ -257,8 +310,8 @@ func createMapping(esURL *url.URL) error {
 	return nil
 }
 
-func getEsVersion(esURL *url.URL) (*semver.Version, error) {
-	resp, err := http.Get(esURL.String())
+func getEsVersion(host string) (*semver.Version, error) {
+	resp, err := http.Get(host)
 	if err != nil {
 		return nil, err
 	}
@@ -277,10 +330,11 @@ func getEsVersion(esURL *url.URL) (*semver.Version, error) {
 
 func encodeIndexOp(
 	encoder *json.Encoder,
-	b *parse.Benchmark,
+	b benchmark,
 	pkg, goos, goarch string,
 	tags map[string]string,
 	timestamp time.Time,
+	cfg elasticsearchConfig,
 ) {
 	doc := map[string]interface{}{
 		fieldExecutedAt: timestamp,
@@ -303,6 +357,17 @@ func encodeIndexOp(
 	if b.Measured&parse.AllocsPerOp != 0 {
 		doc[fieldAllocsPerOp] = b.AllocsPerOp
 	}
+	if b.Events > 0 {
+		apmbench := map[string]float64{
+			fieldAPMbenchErrsRespPerS: b.ErrorResponses,
+			fieldAPMbenchErrsPerS:     b.Errors,
+			fieldAPMbenchEventsPerS:   b.Events,
+			fieldAPMbenchMetricsPerS:  b.Metrics,
+			fieldAPMbenchSpansPerS:    b.Spans,
+			fieldAPMbenchTxPerS:       b.TXs,
+		}
+		doc[fieldAPMbench] = apmbench
+	}
 
 	addHost(doc)
 	addVCS(pkg, doc)
@@ -310,16 +375,25 @@ func encodeIndexOp(
 		doc[key] = value
 	}
 
+	// Versions of Elasticsearch >= 8.0.0 require no _type field
+	esVersion, err := getEsVersion(cfg.host)
+	if err != nil {
+		log.Fatal(err)
+	}
+	includeTypDoc := esVersion.LT(semver.MustParse("8.0.0"))
+
 	type Index struct {
 		Index string `json:"_index"`
-		Type  string `json:"_type"`
+		Type  string `json:"_type,omitempty"`
 	}
 	indexAction := struct {
 		Index Index `json:"index"`
 	}{Index: Index{
-		Index: *esIndexFlag,
-		Type:  "_doc",
+		Index: cfg.index,
 	}}
+	if includeTypDoc {
+		indexAction.Index.Type = "_doc"
+	}
 
 	if err := encoder.Encode(indexAction); err != nil {
 		log.Fatal(err)
@@ -398,4 +472,43 @@ func addVCS(pkgpath string, doc map[string]interface{}) {
 			doc[fieldGit] = gitFields
 		}
 	}
+}
+
+func parseAPMBenchmark(line string) (result apmBenchmark) {
+	entries := strings.Split(line, "\t")
+	// If the result has less than 10 columns, it doesn't contain
+	// apmbench results.
+	if len(entries) < 10 {
+		return result
+	}
+
+	// Ignore the first three entries since they're fixed to be the benchmark,
+	// name, iterations and ns/op.
+	for _, entry := range entries[3:] {
+		parts := strings.Split(strings.TrimSpace(entry), " ")
+		if len(parts) < 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[1])
+		value, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+		if err != nil {
+			continue
+		}
+		switch key {
+		case "error_responses/sec":
+			result.ErrorResponses = value
+		case "errors/sec":
+			result.Errors = value
+		case "events/sec":
+			result.Events = value
+		case "metrics/sec":
+			result.Metrics = value
+		case "spans/sec":
+			result.Spans = value
+		case "txs/sec":
+			result.TXs = value
+		}
+	}
+	return result
 }
