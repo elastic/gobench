@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func Test_parseAPMBenchmark(t *testing.T) {
+func Test_parseExtraMetrics(t *testing.T) {
 	f, err := os.Open("testdata/benchmark-result.txt")
 	if err != nil {
 		t.Fatal(err)
@@ -34,39 +34,41 @@ func Test_parseAPMBenchmark(t *testing.T) {
 	type args struct {
 		line string
 	}
-	expected := []apmBenchmark{
+	expected := []map[string]float64{
 		{
-			Errors:  320.7,
-			Events:  15988,
-			Metrics: 735.5,
-			Spans:   10546,
-			TXs:     4386,
-		},
+			"error_responses_sec": 0,
+			"errors_sec":          320.7,
+			"events_sec":          15988,
+			"metrics_sec":         735.5,
+			"spans_sec":           10546,
+			"txs_sec":             4386},
 		{
-			Errors:  293.8,
-			Events:  12066,
-			Metrics: 716.6,
-			Spans:   6361,
-			TXs:     4695},
+			"error_responses_sec": 0,
+			"errors_sec":          293.8,
+			"events_sec":          12066,
+			"metrics_sec":         716.6,
+			"spans_sec":           6361,
+			"txs_sec":             4695},
 		{
-			Errors:  132.6,
-			Events:  12928,
-			Metrics: 3899,
-			Spans:   7512,
-			TXs:     1385,
-		},
+			"error_responses_sec": 0,
+			"errors_sec":          132.6,
+			"events_sec":          12928,
+			"metrics_sec":         3899,
+			"spans_sec":           7512,
+			"txs_sec":             1385},
 		{
-			Errors:  503.9,
-			Events:  14116,
-			Metrics: 1037,
-			Spans:   8303,
-			TXs:     4272,
-		},
-		{}, // Last entry is ignored.
+			"error_responses_sec": 0,
+			"errors_sec":          503.9,
+			"events_sec":          14116,
+			"metrics_sec":         1037,
+			"spans_sec":           8303,
+			"txs_sec":             4272},
+		nil, // Second to last entry is ignored.
+		nil, // Last entry is ignored.
 	}
 	scanner := bufio.NewScanner(f)
 	for i := 0; scanner.Scan(); i++ {
-		result := parseAPMBenchmark(scanner.Text())
+		result := parseExtraMetrics(scanner.Text())
 		if len(expected) <= i {
 			t.Errorf("expected entry not found for index %d", i)
 			return

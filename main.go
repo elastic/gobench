@@ -73,7 +73,7 @@ type elasticsearchConfig struct {
 
 type benchmark struct {
 	parse.Benchmark
-	apmBenchmark
+	extra map[string]float64
 }
 
 type apmBenchmark struct {
@@ -108,13 +108,7 @@ const (
 	fieldGitCommitter     = "committer"
 	fieldGitCommitterDate = "date"
 
-	fieldAPMbench             = "apmbench"
-	fieldAPMbenchErrsRespPerS = "error_responses_s"
-	fieldAPMbenchErrsPerS     = "errors_s"
-	fieldAPMbenchEventsPerS   = "events_s"
-	fieldAPMbenchMetricsPerS  = "metrics_s"
-	fieldAPMbenchSpansPerS    = "spans_s"
-	fieldAPMbenchTxPerS       = "txs_s"
+	fieldExtraMetrics = "extra_metrics"
 )
 
 var (
@@ -143,14 +137,12 @@ var (
 				},
 			},
 		},
-		fieldAPMbench: {
-			"properties": map[string]fieldProperties{
-				fieldAPMbenchErrsRespPerS: {"type": "double"},
-				fieldAPMbenchErrsPerS:     {"type": "double"},
-				fieldAPMbenchEventsPerS:   {"type": "double"},
-				fieldAPMbenchMetricsPerS:  {"type": "double"},
-				fieldAPMbenchSpansPerS:    {"type": "double"},
-				fieldAPMbenchTxPerS:       {"type": "double"},
+	}
+	esExtraMetricsDynamicTemplate = map[string]interface{}{
+		fieldExtraMetrics: map[string]interface{}{
+			"path_match": "extra_metrics.*",
+			"mapping": map[string]string{
+				"type": "float",
 			},
 		},
 	}
@@ -233,7 +225,7 @@ func main() {
 		default:
 			if b, err := parse.ParseLine(line); err == nil {
 				result := benchmark{Benchmark: *b}
-				result.apmBenchmark = parseAPMBenchmark(line)
+				result.extra = parseExtraMetrics(line)
 				encodeIndexOp(
 					encoder, result,
 					pkg, goos, goarch,
@@ -276,7 +268,10 @@ func createMapping(cfg elasticsearchConfig) error {
 	includeTypeName := esVersion.LT(semver.MustParse("7.0.0"))
 
 	var body bytes.Buffer
-	properties := map[string]interface{}{"properties": esFieldProperties}
+	properties := map[string]interface{}{
+		"properties":        esFieldProperties,
+		"dynamic_templates": []interface{}{esExtraMetricsDynamicTemplate},
+	}
 	if includeTypeName {
 		properties = map[string]interface{}{"_doc": properties}
 	}
@@ -357,16 +352,9 @@ func encodeIndexOp(
 	if b.Measured&parse.AllocsPerOp != 0 {
 		doc[fieldAllocsPerOp] = b.AllocsPerOp
 	}
-	if b.Events > 0 {
-		apmbench := map[string]float64{
-			fieldAPMbenchErrsRespPerS: b.ErrorResponses,
-			fieldAPMbenchErrsPerS:     b.Errors,
-			fieldAPMbenchEventsPerS:   b.Events,
-			fieldAPMbenchMetricsPerS:  b.Metrics,
-			fieldAPMbenchSpansPerS:    b.Spans,
-			fieldAPMbenchTxPerS:       b.TXs,
-		}
-		doc[fieldAPMbench] = apmbench
+	if len(b.extra) > 0 {
+		apmbench := b.extra
+		doc[fieldExtraMetrics] = apmbench
 	}
 
 	addHost(doc)
@@ -474,14 +462,15 @@ func addVCS(pkgpath string, doc map[string]interface{}) {
 	}
 }
 
-func parseAPMBenchmark(line string) (result apmBenchmark) {
+func parseExtraMetrics(line string) map[string]float64 {
 	entries := strings.Split(line, "\t")
-	// If the result has less than 10 columns, it doesn't contain
-	// apmbench results.
-	if len(entries) < 10 {
-		return result
+	// If the result has less than 3 columns, it doesn't contain
+	// extra metrics to be reported.
+	if len(entries) < 3 {
+		return nil
 	}
 
+	result := make(map[string]float64)
 	// Ignore the first three entries since they're fixed to be the benchmark,
 	// name, iterations and ns/op.
 	for _, entry := range entries[3:] {
@@ -496,19 +485,16 @@ func parseAPMBenchmark(line string) (result apmBenchmark) {
 			continue
 		}
 		switch key {
-		case "error_responses/sec":
-			result.ErrorResponses = value
-		case "errors/sec":
-			result.Errors = value
-		case "events/sec":
-			result.Events = value
-		case "metrics/sec":
-			result.Metrics = value
-		case "spans/sec":
-			result.Spans = value
-		case "txs/sec":
-			result.TXs = value
+		case "ns/op", "MB/s", "B/op", "allocs/op":
+			// Ignore the native benchmark fields
+			continue
+		default:
+			escapedKey := strings.ReplaceAll(key, "/", "_")
+			result[escapedKey] = value
 		}
 	}
-	return result
+	if len(result) > 0 {
+		return result
+	}
+	return nil
 }
