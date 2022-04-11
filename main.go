@@ -76,15 +76,6 @@ type benchmark struct {
 	extra map[string]float64
 }
 
-type apmBenchmark struct {
-	ErrorResponses float64
-	Errors         float64
-	Events         float64
-	Metrics        float64
-	Spans          float64
-	TXs            float64
-}
-
 type fieldProperties map[string]interface{}
 
 const (
