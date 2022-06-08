@@ -252,7 +252,7 @@ func main() {
 
 func createMapping(cfg elasticsearchConfig) error {
 	// Versions of Elasticsearch prior to 7.0.0 require type names.
-	esVersion, err := getEsVersion(cfg.host)
+	esVersion, err := getEsVersion(cfg.host, cfg.user, cfg.pass)
 	if err != nil {
 		return err
 	}
@@ -296,8 +296,15 @@ func createMapping(cfg elasticsearchConfig) error {
 	return nil
 }
 
-func getEsVersion(host string) (*semver.Version, error) {
-	resp, err := http.Get(host)
+func getEsVersion(host, user, pass string) (*semver.Version, error) {
+	req, err := http.NewRequest("GET", host, nil)
+	if err != nil {
+		return nil, err
+	}
+	if user != "" || pass != "" {
+		req.SetBasicAuth(user, pass)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -308,6 +315,9 @@ func getEsVersion(host string) (*semver.Version, error) {
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("received unexpected %d status code", resp.StatusCode)
+	}
 	if err := json.NewDecoder(resp.Body).Decode(&esVersion); err != nil {
 		return nil, err
 	}
@@ -355,7 +365,7 @@ func encodeIndexOp(
 	}
 
 	// Versions of Elasticsearch >= 8.0.0 require no _type field
-	esVersion, err := getEsVersion(cfg.host)
+	esVersion, err := getEsVersion(cfg.host, cfg.user, cfg.pass)
 	if err != nil {
 		log.Fatal(err)
 	}

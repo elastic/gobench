@@ -19,10 +19,13 @@ package main
 
 import (
 	"bufio"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func Test_parseExtraMetrics(t *testing.T) {
@@ -75,4 +78,41 @@ func Test_parseExtraMetrics(t *testing.T) {
 		}
 		assert.Equal(t, expected[i], result)
 	}
+}
+
+func Test_getEsVersion(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Write([]byte(`{"version" : {"number" : "7.11.1"}}`))
+		}))
+		t.Cleanup(srv.Close)
+		v, err := getEsVersion(srv.URL, "", "")
+		require.NoError(t, err)
+		require.NotNil(t, v)
+		assert.Equal(t, "7.11.1", v.String())
+	})
+	t.Run("success-auth", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			user, password, ok := r.BasicAuth()
+			require.True(t, ok)
+			assert.Equal(t, "myuser", user)
+			assert.Equal(t, "mypassword", password)
+			w.Write([]byte(`{"version" : {"number" : "7.11.1"}}`))
+		}))
+		t.Cleanup(srv.Close)
+		v, err := getEsVersion(srv.URL, "myuser", "mypassword")
+		require.NoError(t, err)
+		require.NotNil(t, v)
+		assert.Equal(t, "7.11.1", v.String())
+	})
+	t.Run("fail-401", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(401)
+			w.Write([]byte(`{"error":{"root_cause":[{"type":"security_exception","reason":"missing authentication credentials for REST request [/]","header":{"WWW-Authenticate":["Basic realm=\"security\" charset=\"UTF-8\"","Bearer realm=\"security\"","ApiKey"]}}],"type":"security_exception","reason":"missing authentication credentials for REST request [/]","header":{"WWW-Authenticate":["Basic realm=\"security\" charset=\"UTF-8\"","Bearer realm=\"security\"","ApiKey"]}},"status":401}`))
+		}))
+		t.Cleanup(srv.Close)
+		v, err := getEsVersion(srv.URL, "", "")
+		assert.EqualError(t, err, "received unexpected 401 status code")
+		assert.Nil(t, v)
+	})
 }
