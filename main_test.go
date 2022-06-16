@@ -19,9 +19,11 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,13 +82,76 @@ func Test_parseExtraMetrics(t *testing.T) {
 	}
 }
 
+func Test_readInputConfig(t *testing.T) {
+	t.Run(" override full config success", func(t *testing.T) {
+		host := "https://top-host:9200"
+		index := "bench"
+		username := "elastic"
+		pass := "t0pSeCr3t"
+		tlsSkipVerify := "true"
+		tlsSkipVerifyBool, _ := strconv.ParseBool(tlsSkipVerify)
+		requestTimeout := "100"
+		requestTimeoutInt, _ := strconv.Atoi(requestTimeout)
+
+		os.Args = []string{
+			"cmd",
+			"-es", host,
+			"-index", index,
+			"-es-username", username,
+			"-es-password", pass,
+			"-request-timeout", requestTimeout,
+			"-tls-verify", tlsSkipVerify,
+		}
+
+		//flags are now reset
+		defer func() { flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError) }()
+
+		var cfg elasticsearchConfig
+		readInputConfig(&cfg)
+		assert.Equal(t, host, cfg.host)
+		assert.Equal(t, index, cfg.index)
+		assert.Equal(t, username, cfg.user)
+		assert.Equal(t, pass, cfg.pass)
+		assert.Equal(t, tlsSkipVerifyBool, cfg.shouldSkipTlsVerify)
+		assert.Equal(t, requestTimeoutInt, cfg.httpTimeoutSeconds)
+
+	})
+
+	t.Run(" override partial config success", func(t *testing.T) {
+		host := "https://top-host:9200"
+		index := "bench"
+		username := "elastic"
+		pass := "t0pSeCr3t"
+
+		os.Args = []string{
+			"cmd",
+			"-es", host,
+			"-index", index,
+			"-es-username", username,
+			"-es-password", pass,
+		}
+
+		//flags are now reset
+		defer func() { flag.CommandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError) }()
+		var cfg elasticsearchConfig
+		readInputConfig(&cfg)
+		assert.Equal(t, host, cfg.host)
+		assert.Equal(t, index, cfg.index)
+		assert.Equal(t, username, cfg.user)
+		assert.Equal(t, pass, cfg.pass)
+		assert.Equal(t, false, cfg.shouldSkipTlsVerify)
+		assert.Equal(t, 600, cfg.httpTimeoutSeconds)
+
+	})
+}
+
 func Test_getEsVersion(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Write([]byte(`{"version" : {"number" : "7.11.1"}}`))
 		}))
 		t.Cleanup(srv.Close)
-		v, err := getEsVersion(srv.URL, "", "")
+		v, err := getEsVersion(elasticsearchConfig{host: srv.URL, user: "", pass: ""})
 		require.NoError(t, err)
 		require.NotNil(t, v)
 		assert.Equal(t, "7.11.1", v.String())
@@ -100,7 +165,7 @@ func Test_getEsVersion(t *testing.T) {
 			w.Write([]byte(`{"version" : {"number" : "7.11.1"}}`))
 		}))
 		t.Cleanup(srv.Close)
-		v, err := getEsVersion(srv.URL, "myuser", "mypassword")
+		v, err := getEsVersion(elasticsearchConfig{host: srv.URL, user: "myuser", pass: "mypassword"})
 		require.NoError(t, err)
 		require.NotNil(t, v)
 		assert.Equal(t, "7.11.1", v.String())
@@ -111,7 +176,7 @@ func Test_getEsVersion(t *testing.T) {
 			w.Write([]byte(`{"error":{"root_cause":[{"type":"security_exception","reason":"missing authentication credentials for REST request [/]","header":{"WWW-Authenticate":["Basic realm=\"security\" charset=\"UTF-8\"","Bearer realm=\"security\"","ApiKey"]}}],"type":"security_exception","reason":"missing authentication credentials for REST request [/]","header":{"WWW-Authenticate":["Basic realm=\"security\" charset=\"UTF-8\"","Bearer realm=\"security\"","ApiKey"]}},"status":401}`))
 		}))
 		t.Cleanup(srv.Close)
-		v, err := getEsVersion(srv.URL, "", "")
+		v, err := getEsVersion(elasticsearchConfig{host: srv.URL, user: "", pass: ""})
 		assert.EqualError(t, err, "received unexpected 401 status code")
 		assert.Nil(t, v)
 	})

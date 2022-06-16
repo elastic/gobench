@@ -20,6 +20,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -60,15 +61,47 @@ func (e *esError) Error() string {
 	return e.Reason
 }
 
+/*
+	The timer remains running after Get, Head, Post, or Do return and will interrupt reading of the Response.Body.
+	That's why it's this big. It's specified in the first place because the DefaultClient of the http package does not timeout. Never.
+*/
+var httpTimeoutSeconds = 600
+
+func getDefaultClient(timeoutSeconds int) *http.Client {
+	return &http.Client{
+		Timeout: time.Second * time.Duration(timeoutSeconds)}
+}
+
+func getSecureClient(timeoutSeconds int) *http.Client {
+	customTransport := &(*http.DefaultTransport.(*http.Transport)) // make shallow copy
+	customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+	cl := &http.Client{
+		Timeout:   time.Second * time.Duration(timeoutSeconds),
+		Transport: customTransport,
+	}
+
+	return cl
+}
+
 const (
 	exceptionResourceAlreadyExists = "resource_already_exists_exception"
 )
 
 type elasticsearchConfig struct {
-	host  string
-	user  string
-	pass  string
-	index string
+	host                string
+	user                string
+	pass                string
+	index               string
+	shouldSkipTlsVerify bool
+	httpTimeoutSeconds  int
+}
+
+func getHttpClient(skipTlsVerify bool, timeoutSeconds int) *http.Client {
+	if skipTlsVerify {
+		return getSecureClient(timeoutSeconds)
+	}
+	return getDefaultClient(timeoutSeconds)
 }
 
 type benchmark struct {
@@ -139,23 +172,33 @@ var (
 	}
 )
 
-func main() {
-	var esConfig elasticsearchConfig
-	flag.StringVar(&esConfig.host,
+func readInputConfig(cfg *elasticsearchConfig) {
+	flag.StringVar(&cfg.host,
 		"es", "",
 		`Elasticsearch URL into which the benchmark data should be indexed, e.g. http://localhost:9200`,
 	)
-	flag.StringVar(&esConfig.index,
+	flag.StringVar(&cfg.index,
 		"index", "gobench",
 		"Elasticsearch index into which the benchmarks should be stored.",
 	)
-	flag.StringVar(&esConfig.user, "es-username", "",
+	flag.StringVar(&cfg.user, "es-username", "",
 		"Elasticsearch username used for authentication.",
 	)
-	flag.StringVar(&esConfig.pass, "es-password", "",
+	flag.StringVar(&cfg.pass, "es-password", "",
 		"Elasticsearch password used for authentication.",
 	)
+	flag.IntVar(&cfg.httpTimeoutSeconds, "request-timeout", httpTimeoutSeconds,
+		"Http timeout threshold in seconds.",
+	)
+	flag.BoolVar(&cfg.shouldSkipTlsVerify, "tls-verify", false,
+		"Should skip TLS verification.",
+	)
 	flag.Parse()
+}
+
+func main() {
+	var esConfig elasticsearchConfig
+	readInputConfig(&esConfig)
 
 	tags := make(map[string]string)
 	for _, field := range strings.Split(*tagsFlag, ",") {
@@ -241,7 +284,7 @@ func main() {
 		req.SetBasicAuth(esConfig.user, esConfig.pass)
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := getHttpClient(esConfig.shouldSkipTlsVerify, esConfig.httpTimeoutSeconds).Do(req)
 	if err != nil {
 		log.Fatalf("error executing bulk updates: %s", err)
 	}
@@ -252,7 +295,7 @@ func main() {
 
 func createMapping(cfg elasticsearchConfig) error {
 	// Versions of Elasticsearch prior to 7.0.0 require type names.
-	esVersion, err := getEsVersion(cfg.host, cfg.user, cfg.pass)
+	esVersion, err := getEsVersion(cfg)
 	if err != nil {
 		return err
 	}
@@ -279,7 +322,7 @@ func createMapping(cfg elasticsearchConfig) error {
 		req.SetBasicAuth(cfg.user, cfg.pass)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := getHttpClient(cfg.shouldSkipTlsVerify, cfg.httpTimeoutSeconds).Do(req)
 	if err != nil {
 		return err
 	}
@@ -296,15 +339,16 @@ func createMapping(cfg elasticsearchConfig) error {
 	return nil
 }
 
-func getEsVersion(host, user, pass string) (*semver.Version, error) {
-	req, err := http.NewRequest("GET", host, nil)
+func getEsVersion(cfg elasticsearchConfig) (*semver.Version, error) {
+	req, err := http.NewRequest("GET", cfg.host, nil)
 	if err != nil {
 		return nil, err
 	}
-	if user != "" || pass != "" {
-		req.SetBasicAuth(user, pass)
+	if cfg.user != "" || cfg.pass != "" {
+		req.SetBasicAuth(cfg.user, cfg.pass)
 	}
-	resp, err := http.DefaultClient.Do(req)
+
+	resp, err := getHttpClient(cfg.shouldSkipTlsVerify, cfg.httpTimeoutSeconds).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +409,7 @@ func encodeIndexOp(
 	}
 
 	// Versions of Elasticsearch >= 8.0.0 require no _type field
-	esVersion, err := getEsVersion(cfg.host, cfg.user, cfg.pass)
+	esVersion, err := getEsVersion(cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
