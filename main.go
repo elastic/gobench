@@ -285,6 +285,22 @@ func main() {
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	resp, err := getHttpClient(esConfig.shouldSkipTlsVerify, esConfig.httpTimeoutSeconds).Do(req)
+	var respbod map[string]interface{}
+	jsonErr2 := json.NewDecoder(resp.Body).Decode(&respbod)
+	if jsonErr2 != nil {
+		log.Fatalf("error jsoninfs: %s", respbod)
+	}
+	pretty.Println(respbod)
+	pretty.Println(resp.ContentLength)
+	pretty.Println(resp.StatusCode)
+
+	var result map[string]interface{}
+	jsonErr := json.NewDecoder(resp.Body).Decode(&result)
+	if jsonErr != nil {
+		log.Fatalf("error jsoninfs: %s", jsonErr)
+	}
+	pretty.Println(result)
+
 	if err != nil {
 		log.Fatalf("error executing bulk updates: %s", err)
 	}
@@ -433,6 +449,9 @@ func encodeIndexOp(
 	}
 	if err := encoder.Encode(doc); err != nil {
 		log.Fatal(err)
+	}
+	if newLineErr := encoder.Encode("\n"); newLineErr != nil {
+		log.Fatal(newLineErr)
 	}
 }
 

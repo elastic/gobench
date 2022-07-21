@@ -1,4 +1,4 @@
-module github.com/elastic/gobench
+module github.com/ekrucio/gobench
 
 go 1.17
 
