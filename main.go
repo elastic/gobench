@@ -286,20 +286,24 @@ func main() {
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	resp, err := getHttpClient(esConfig.shouldSkipTlsVerify, esConfig.httpTimeoutSeconds).Do(req)
 	var respbod map[string]interface{}
-	jsonErr2 := json.NewDecoder(resp.Body).Decode(&respbod)
+	jsonErr2 := json.NewDecoder(req.Body).Decode(&respbod)
 	if jsonErr2 != nil {
 		log.Fatalf("error jsoninfs: %s", respbod)
 	}
+	fmt.Println("REQUEST")
 	pretty.Println(respbod)
 	pretty.Println(resp.ContentLength)
 	pretty.Println(resp.StatusCode)
+	fmt.Println("________________________________-")
 
 	var result map[string]interface{}
 	jsonErr := json.NewDecoder(resp.Body).Decode(&result)
 	if jsonErr != nil {
 		log.Fatalf("error jsoninfs: %s", jsonErr)
 	}
+	fmt.Println("RESPONSE")
 	pretty.Println(result)
+	fmt.Println("________________________________-")
 
 	if err != nil {
 		log.Fatalf("error executing bulk updates: %s", err)
@@ -419,7 +423,10 @@ func encodeIndexOp(
 	}
 
 	addHost(doc)
-	addVCS(pkg, doc)
+	vcserr := addVCS(pkg, doc)
+	if vcserr != nil {
+		log.Fatal(vcserr)
+	}
 	for key, value := range tags {
 		doc[key] = value
 	}
@@ -449,9 +456,6 @@ func encodeIndexOp(
 	}
 	if err := encoder.Encode(doc); err != nil {
 		log.Fatal(err)
-	}
-	if newLineErr := encoder.Encode("\n"); newLineErr != nil {
-		log.Fatal(newLineErr)
 	}
 }
 
@@ -490,14 +494,14 @@ func addHost(doc map[string]interface{}) {
 	}
 }
 
-func addVCS(pkgpath string, doc map[string]interface{}) {
+func addVCS(pkgpath string, doc map[string]interface{}) error {
 	pkg, err := build.Import(pkgpath, "", build.FindOnly)
 	if err != nil {
-		return
+		return err
 	}
 	vcsCmd, _, err := vcs.FromDir(pkg.Dir, pkg.SrcRoot)
 	if err != nil {
-		return
+		return err
 	}
 
 	switch vcsCmd.Cmd {
@@ -506,7 +510,7 @@ func addVCS(pkgpath string, doc map[string]interface{}) {
 		cmd.Dir = pkg.Dir
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			return
+			return err
 		}
 		fields := strings.SplitN(strings.TrimSpace(string(output)), " ", 3)
 		if len(fields) == 3 {
@@ -520,10 +524,13 @@ func addVCS(pkgpath string, doc map[string]interface{}) {
 				gitFields[fieldGitCommitter] = map[string]interface{}{
 					fieldGitCommitterDate: committerDate,
 				}
+			} else {
+				return err
 			}
 			doc[fieldGit] = gitFields
 		}
 	}
+	return nil
 }
 
 func parseExtraMetrics(line string) map[string]float64 {
