@@ -285,25 +285,6 @@ func main() {
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
 	resp, err := getHttpClient(esConfig.shouldSkipTlsVerify, esConfig.httpTimeoutSeconds).Do(req)
-	var respbod map[string]interface{}
-	jsonErr2 := json.NewDecoder(req.Body).Decode(&respbod)
-	if jsonErr2 != nil {
-		log.Fatalf("error jsoninfs: %s", respbod)
-	}
-	fmt.Println("REQUEST")
-	pretty.Println(respbod)
-	pretty.Println(resp.ContentLength)
-	pretty.Println(resp.StatusCode)
-	fmt.Println("________________________________-")
-
-	var result map[string]interface{}
-	jsonErr := json.NewDecoder(resp.Body).Decode(&result)
-	if jsonErr != nil {
-		log.Fatalf("error jsoninfs: %s", jsonErr)
-	}
-	fmt.Println("RESPONSE")
-	pretty.Println(result)
-	fmt.Println("________________________________-")
 
 	if err != nil {
 		log.Fatalf("error executing bulk updates: %s", err)
@@ -421,7 +402,6 @@ func encodeIndexOp(
 		apmbench := b.extra
 		doc[fieldExtraMetrics] = apmbench
 	}
-
 	addHost(doc)
 	vcserr := addVCS(pkg, doc)
 	if vcserr != nil {
@@ -495,7 +475,7 @@ func addHost(doc map[string]interface{}) {
 }
 
 func addVCS(pkgpath string, doc map[string]interface{}) error {
-	pkg, err := build.Import(pkgpath, "", build.FindOnly)
+	pkg, err := build.Import(pkgpath, "", build.IgnoreVendor)
 	if err != nil {
 		return err
 	}
