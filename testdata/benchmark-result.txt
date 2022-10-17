@@ -1,3 +1,7 @@
+goos: linux
+goarch: amd64
+pkg: github.com/elastic/gobench
+cpu: AMD EPYC 7763 64-Core Processor
 BenchmarkAgentGo-16    	    1006	 327431070 ns/op	         0 error_responses/sec	       320.7 errors/sec	     15988 events/sec	       735.5 metrics/sec	     10546 spans/sec	      4386 txs/sec	  973598 B/op	    1922 allocs/op
 BenchmarkAgentNodeJS-16	    2149	 166787709 ns/op	         0 error_responses/sec	       293.8 errors/sec	     12066 events/sec	       716.6 metrics/sec	      6361 spans/sec	      4695 txs/sec	 1906253 B/op	    3538 allocs/op
 BenchmarkAgentPython-16	     589	 543029807 ns/op	         0 error_responses/sec	       132.6 errors/sec	     12928 events/sec	      3899 metrics/sec	      7512 spans/sec	      1385 txs/sec	 5188820 B/op	    9830 allocs/op
