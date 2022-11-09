@@ -148,8 +148,8 @@ var (
 		fieldAllocsPerOp:       {"type": "long"},
 		fieldGit: {
 			"properties": map[string]fieldProperties{
-				fieldGitCommit:  {"type": "text"},
-				fieldGitSubject: {"type": "text"},
+				fieldGitCommit:  {"type": "keyword"},
+				fieldGitSubject: {"type": "keyword"},
 				fieldGitCommitter: {
 					"properties": map[string]fieldProperties{
 						fieldGitCommitterDate: {"type": "date"},
