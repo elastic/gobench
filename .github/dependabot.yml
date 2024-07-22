@@ -4,7 +4,7 @@ updates:
   - package-ecosystem: "gomod"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
   # GitHub actions
   - package-ecosystem: "github-actions"
     directory: "/"
