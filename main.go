@@ -20,6 +20,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -60,15 +62,39 @@ func (e *esError) Error() string {
 	return e.Reason
 }
 
+var defaultCommandTimeout = time.Duration(600 * time.Second)
+
+var defaultHttpClient *http.Client
+
+func getSecureClient() *http.Client {
+	customTransport := &(*http.DefaultTransport.(*http.Transport)) // make shallow copy
+	customTransport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+
+	cl := &http.Client{
+		Transport: customTransport,
+	}
+
+	return cl
+}
+
 const (
 	exceptionResourceAlreadyExists = "resource_already_exists_exception"
 )
 
 type elasticsearchConfig struct {
-	host  string
-	user  string
-	pass  string
-	index string
+	host                string
+	user                string
+	pass                string
+	index               string
+	shouldSkipTlsVerify bool
+	commandTimeout      time.Duration
+}
+
+func getHttpClient(skipTlsVerify bool) *http.Client {
+	if skipTlsVerify {
+		return getSecureClient()
+	}
+	return &http.Client{}
 }
 
 type benchmark struct {
@@ -93,11 +119,14 @@ const (
 	fieldAllocedBytesPerOp = "alloced_bytes_per_op"
 	fieldAllocsPerOp       = "allocs_per_op"
 
-	fieldGit              = "git"
-	fieldGitCommit        = "commit"
-	fieldGitSubject       = "subject"
-	fieldGitCommitter     = "committer"
-	fieldGitCommitterDate = "date"
+	fieldGit                     = "git"
+	fieldGitCommit               = "commit"
+	fieldGitSubject              = "subject"
+	fieldGitCommitter            = "committer"
+	fieldGitCommitterDate        = "date"
+	fieldGitCommitterAuthor      = "author"
+	fieldGitCommitterAuthorEmail = "email"
+	fieldGitCommitterAuthorName  = "name"
 
 	fieldExtraMetrics = "extra_metrics"
 )
@@ -119,11 +148,17 @@ var (
 		fieldAllocsPerOp:       {"type": "long"},
 		fieldGit: {
 			"properties": map[string]fieldProperties{
-				fieldGitCommit:  {"type": "text"},
-				fieldGitSubject: {"type": "text"},
+				fieldGitCommit:  {"type": "keyword"},
+				fieldGitSubject: {"type": "keyword"},
 				fieldGitCommitter: {
 					"properties": map[string]fieldProperties{
 						fieldGitCommitterDate: {"type": "date"},
+						fieldGitCommitterAuthor: {
+							"properties": map[string]fieldProperties{
+								fieldGitCommitterAuthorEmail: {"type": "keyword"},
+								fieldGitCommitterAuthorName:  {"type": "keyword"},
+							},
+						},
 					},
 				},
 			},
@@ -139,23 +174,36 @@ var (
 	}
 )
 
-func main() {
-	var esConfig elasticsearchConfig
-	flag.StringVar(&esConfig.host,
+func readInputConfig(cfg *elasticsearchConfig) {
+	flag.StringVar(&cfg.host,
 		"es", "",
 		`Elasticsearch URL into which the benchmark data should be indexed, e.g. http://localhost:9200`,
 	)
-	flag.StringVar(&esConfig.index,
+	flag.StringVar(&cfg.index,
 		"index", "gobench",
 		"Elasticsearch index into which the benchmarks should be stored.",
 	)
-	flag.StringVar(&esConfig.user, "es-username", "",
+	flag.StringVar(&cfg.user, "es-username", "",
 		"Elasticsearch username used for authentication.",
 	)
-	flag.StringVar(&esConfig.pass, "es-password", "",
+	flag.StringVar(&cfg.pass, "es-password", "",
 		"Elasticsearch password used for authentication.",
 	)
+	flag.DurationVar(&cfg.commandTimeout, "command-timeout", defaultCommandTimeout,
+		"Http timeout threshold in seconds.",
+	)
+	flag.BoolVar(&cfg.shouldSkipTlsVerify, "tls-verify", true,
+		"Should skip TLS verification.",
+	)
 	flag.Parse()
+}
+
+func main() {
+	var esConfig elasticsearchConfig
+	readInputConfig(&esConfig)
+	defaultHttpClient = getHttpClient(esConfig.shouldSkipTlsVerify)
+	ctx, cancel := context.WithTimeout(context.Background(), esConfig.commandTimeout)
+	defer cancel()
 
 	tags := make(map[string]string)
 	for _, field := range strings.Split(*tagsFlag, ",") {
@@ -196,7 +244,7 @@ func main() {
 	encoder := json.NewEncoder(output)
 
 	if esURL != nil {
-		if err := createMapping(esConfig); err != nil {
+		if err := createMapping(ctx, esConfig); err != nil {
 			log.Fatalf("error creating/updating mapping: %s", err)
 		}
 	}
@@ -218,6 +266,7 @@ func main() {
 				result := benchmark{Benchmark: *b}
 				result.extra = parseExtraMetrics(line)
 				encodeIndexOp(
+					ctx,
 					encoder, result,
 					pkg, goos, goarch,
 					tags, timestamp,
@@ -241,7 +290,9 @@ func main() {
 		req.SetBasicAuth(esConfig.user, esConfig.pass)
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
-	resp, err := http.DefaultClient.Do(req)
+	req.WithContext(ctx)
+	resp, err := getHttpClient(esConfig.shouldSkipTlsVerify).Do(req)
+
 	if err != nil {
 		log.Fatalf("error executing bulk updates: %s", err)
 	}
@@ -250,9 +301,9 @@ func main() {
 	}
 }
 
-func createMapping(cfg elasticsearchConfig) error {
+func createMapping(ctx context.Context, cfg elasticsearchConfig) error {
 	// Versions of Elasticsearch prior to 7.0.0 require type names.
-	esVersion, err := getEsVersion(cfg.host, cfg.user, cfg.pass)
+	esVersion, err := getEsVersion(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -279,7 +330,10 @@ func createMapping(cfg elasticsearchConfig) error {
 		req.SetBasicAuth(cfg.user, cfg.pass)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+
+	req.WithContext(ctx)
+	resp, err := defaultHttpClient.Do(req)
+
 	if err != nil {
 		return err
 	}
@@ -296,15 +350,18 @@ func createMapping(cfg elasticsearchConfig) error {
 	return nil
 }
 
-func getEsVersion(host, user, pass string) (*semver.Version, error) {
-	req, err := http.NewRequest("GET", host, nil)
+func getEsVersion(ctx context.Context, cfg elasticsearchConfig) (*semver.Version, error) {
+	req, err := http.NewRequest("GET", cfg.host, nil)
 	if err != nil {
 		return nil, err
 	}
-	if user != "" || pass != "" {
-		req.SetBasicAuth(user, pass)
+	if cfg.user != "" || cfg.pass != "" {
+		req.SetBasicAuth(cfg.user, cfg.pass)
 	}
-	resp, err := http.DefaultClient.Do(req)
+
+	req.WithContext(ctx)
+
+	resp, err := defaultHttpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -325,6 +382,7 @@ func getEsVersion(host, user, pass string) (*semver.Version, error) {
 }
 
 func encodeIndexOp(
+	ctx context.Context,
 	encoder *json.Encoder,
 	b benchmark,
 	pkg, goos, goarch string,
@@ -357,15 +415,17 @@ func encodeIndexOp(
 		apmbench := b.extra
 		doc[fieldExtraMetrics] = apmbench
 	}
-
 	addHost(doc)
-	addVCS(pkg, doc)
+	vcserr := addVCS(pkg, doc)
+	if vcserr != nil {
+		log.Fatal(vcserr)
+	}
 	for key, value := range tags {
 		doc[key] = value
 	}
 
 	// Versions of Elasticsearch >= 8.0.0 require no _type field
-	esVersion, err := getEsVersion(cfg.host, cfg.user, cfg.pass)
+	esVersion, err := getEsVersion(ctx, cfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -427,26 +487,26 @@ func addHost(doc map[string]interface{}) {
 	}
 }
 
-func addVCS(pkgpath string, doc map[string]interface{}) {
-	pkg, err := build.Import(pkgpath, "", build.FindOnly)
+func addVCS(pkgpath string, doc map[string]interface{}) error {
+	pkg, err := build.Import(pkgpath, "", build.IgnoreVendor)
 	if err != nil {
-		return
+		return err
 	}
 	vcsCmd, _, err := vcs.FromDir(pkg.Dir, pkg.SrcRoot)
 	if err != nil {
-		return
+		return err
 	}
 
 	switch vcsCmd.Cmd {
 	case "git":
-		cmd := exec.Command("git", "log", "-1", "--format=%H %ct %s")
+		cmd := exec.Command("git", "log", "-1", "--format=%H %ct %s %ae %an")
 		cmd.Dir = pkg.Dir
 		output, err := cmd.CombinedOutput()
 		if err != nil {
-			return
+			return err
 		}
-		fields := strings.SplitN(strings.TrimSpace(string(output)), " ", 3)
-		if len(fields) == 3 {
+		fields := strings.SplitN(strings.TrimSpace(string(output)), " ", 5)
+		if len(fields) == 5 {
 			gitFields := map[string]interface{}{
 				fieldGitCommit:  fields[0],
 				fieldGitSubject: fields[2],
@@ -456,11 +516,18 @@ func addVCS(pkgpath string, doc map[string]interface{}) {
 				committerDate := time.Unix(unixSec, 0).UTC()
 				gitFields[fieldGitCommitter] = map[string]interface{}{
 					fieldGitCommitterDate: committerDate,
+					fieldGitCommitterAuthor: map[string]interface{}{
+						fieldGitCommitterAuthorName:  fields[4],
+						fieldGitCommitterAuthorEmail: fields[3],
+					},
 				}
+			} else {
+				return err
 			}
 			doc[fieldGit] = gitFields
 		}
 	}
+	return nil
 }
 
 func parseExtraMetrics(line string) map[string]float64 {
