@@ -65,10 +65,11 @@ const (
 )
 
 type elasticsearchConfig struct {
-	host  string
-	user  string
-	pass  string
-	index string
+	host   string
+	user   string
+	pass   string
+	apiKey string
+	index  string
 }
 
 type benchmark struct {
@@ -155,6 +156,9 @@ func main() {
 	flag.StringVar(&esConfig.pass, "es-password", "",
 		"Elasticsearch password used for authentication.",
 	)
+	flag.StringVar(&esConfig.apiKey, "es-api-key", "",
+		"Elasticsearch API key used for authentication.",
+	)
 	flag.Parse()
 
 	tags := make(map[string]string)
@@ -237,7 +241,9 @@ func main() {
 	bulkURL := *esURL
 	bulkURL.Path += "/_bulk"
 	req, err := http.NewRequest(http.MethodPost, bulkURL.String(), &buf)
-	if esConfig.user != "" && esConfig.pass != "" {
+	if esConfig.apiKey != "" {
+		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", esConfig.apiKey))
+	} else if esConfig.user != "" && esConfig.pass != "" {
 		req.SetBasicAuth(esConfig.user, esConfig.pass)
 	}
 	req.Header.Set("Content-Type", "application/x-ndjson")
@@ -252,7 +258,7 @@ func main() {
 
 func createMapping(cfg elasticsearchConfig) error {
 	// Versions of Elasticsearch prior to 7.0.0 require type names.
-	esVersion, err := getEsVersion(cfg.host, cfg.user, cfg.pass)
+	esVersion, err := getEsVersion(cfg.host, cfg.apiKey, cfg.user, cfg.pass)
 	if err != nil {
 		return err
 	}
@@ -275,7 +281,9 @@ func createMapping(cfg elasticsearchConfig) error {
 	if err != nil {
 		return err
 	}
-	if cfg.user != "" && cfg.pass != "" {
+	if cfg.apiKey != "" {
+		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", cfg.apiKey))
+	} else if cfg.user != "" && cfg.pass != "" {
 		req.SetBasicAuth(cfg.user, cfg.pass)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -296,12 +304,14 @@ func createMapping(cfg elasticsearchConfig) error {
 	return nil
 }
 
-func getEsVersion(host, user, pass string) (*semver.Version, error) {
+func getEsVersion(host, apiKey, user, pass string) (*semver.Version, error) {
 	req, err := http.NewRequest("GET", host, nil)
 	if err != nil {
 		return nil, err
 	}
-	if user != "" || pass != "" {
+	if apiKey != "" {
+		req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", apiKey))
+	} else if user != "" && pass != "" {
 		req.SetBasicAuth(user, pass)
 	}
 	resp, err := http.DefaultClient.Do(req)
@@ -316,7 +326,8 @@ func getEsVersion(host, user, pass string) (*semver.Version, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("received unexpected %d status code", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("received unexpected %d status code %s", resp.StatusCode, string(b))
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&esVersion); err != nil {
 		return nil, err
@@ -365,7 +376,7 @@ func encodeIndexOp(
 	}
 
 	// Versions of Elasticsearch >= 8.0.0 require no _type field
-	esVersion, err := getEsVersion(cfg.host, cfg.user, cfg.pass)
+	esVersion, err := getEsVersion(cfg.host, cfg.apiKey, cfg.user, cfg.pass)
 	if err != nil {
 		log.Fatal(err)
 	}
