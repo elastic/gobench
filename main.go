@@ -62,6 +62,7 @@ func (e *esError) Error() string {
 
 const (
 	exceptionResourceAlreadyExists = "resource_already_exists_exception"
+	exceptionInvalidIndexName      = "invalid_index_name_exception"
 )
 
 type elasticsearchConfig struct {
@@ -237,6 +238,9 @@ func main() {
 	bulkURL := *esURL
 	bulkURL.Path += "/_bulk"
 	req, err := http.NewRequest(http.MethodPost, bulkURL.String(), &buf)
+	if err != nil {
+		log.Fatalf("error building bulk updates request: %s", err)
+	}
 	if esConfig.user != "" && esConfig.pass != "" {
 		req.SetBasicAuth(esConfig.user, esConfig.pass)
 	}
@@ -248,6 +252,21 @@ func main() {
 	if err := handleResponse(resp); err != nil {
 		log.Fatalf("error executing bulk updates: %s", err)
 	}
+}
+
+func indexOrAliasAlreadyExists(err error) bool {
+	var esErr *esError
+	if errors.As(err, &esErr) {
+		if esErr.Type == exceptionResourceAlreadyExists {
+			// Index already exists
+			return true
+		}
+		if esErr.Type == exceptionInvalidIndexName && strings.Contains(esErr.Reason, "exists as alias") {
+			// Index name already exists as an alias
+			return true
+		}
+	}
+	return false
 }
 
 func createMapping(cfg elasticsearchConfig) error {
@@ -283,9 +302,8 @@ func createMapping(cfg elasticsearchConfig) error {
 	if err != nil {
 		return err
 	}
-	if err := handleResponse(resp); err != nil {
-		esErr, ok := err.(*esError)
-		if ok && esErr.Type == exceptionResourceAlreadyExists {
+	if err = handleResponse(resp); err != nil {
+		if indexOrAliasAlreadyExists(err) {
 			if *verboseFlag {
 				log.Printf("index %q already exists", cfg.index)
 			}
